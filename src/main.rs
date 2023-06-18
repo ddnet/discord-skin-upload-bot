@@ -40,7 +40,7 @@ impl EventHandler for Handler {
                     ),
                 )
                 .await
-                .unwrap()
+                .unwrap_or(false)
             {
                 let database_url =
                     env::var("DATABASE_URL").unwrap_or("https://ddnet.org/skins/".to_string());
