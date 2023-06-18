@@ -591,7 +591,7 @@ impl EventHandler for Handler {
                                                 new_msg += &skin.license;
                                                 new_msg += &format!("\" (has 256x128 skin: {}, has 512x256 skin: {})", !skin.file_256x128.is_empty(), !skin.file_512x256.is_empty());
                                                 if skin.positive_ratio > 0.0 {
-                                                    new_msg += &format!(" -- positive ratio: {}", skin.positive_ratio);
+                                                    new_msg += &format!(" -- positive ratio: {}%", skin.positive_ratio * 100.0);
                                                 }
                                                 new_msg += "\n";
                                             },
