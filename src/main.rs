@@ -42,6 +42,8 @@ impl EventHandler for Handler {
                 .await
                 .unwrap()
             {
+                let database_url =
+                    env::var("DATABASE_URL").unwrap_or("https://ddnet.org/skins/".to_string());
                 let basic_auth_user_name =
                     env::var("USERNAME").expect("Expected USERNAME for http auth in environment");
                 let basic_auth_password =
@@ -74,8 +76,11 @@ impl EventHandler for Handler {
 
                                 // let's upload
                                 let mut skins_to_upload = item.skins_to_upload.clone();
+                                let upload_lock =
+                                    data.get_mut::<SkinUploads>().unwrap().upload_lock.clone();
                                 drop(data);
 
+                                let _g = upload_lock.lock().await;
                                 let data = CreateInteractionResponseMessage::new()
                                     .content("Starting to upload")
                                     .ephemeral(true);
@@ -109,6 +114,7 @@ impl EventHandler for Handler {
                                         let get_form_base_clone = get_form_base.clone();
                                         let basic_auth_user_name = basic_auth_user_name.clone();
                                         let basic_auth_password = basic_auth_password.clone();
+                                        let db_url = database_url.clone();
                                         tokio::task::spawn_blocking(move || {
                                             image::save_buffer_with_format(
                                                 skin_name_clone.clone() + ".png",
@@ -122,7 +128,7 @@ impl EventHandler for Handler {
                                             let form = get_form_base_clone(skin_name_clone.clone())
                                                 .text("skinisuhd", "false");
                                             if let Err(err) = reqwest::blocking::Client::new()
-                                                .post("http://localhost/skins/edit/modify_skin.php")
+                                                .post(db_url + "edit/modify_skin.php")
                                                 .multipart(form)
                                                 .basic_auth(basic_auth_user_name, Some(basic_auth_password))
                                                 .send()
@@ -141,6 +147,7 @@ impl EventHandler for Handler {
                                         let skin_name_clone = skin_name.clone();
                                         let basic_auth_user_name = basic_auth_user_name.clone();
                                         let basic_auth_password = basic_auth_password.clone();
+                                        let db_url = database_url.clone();
                                         tokio::task::spawn_blocking(move || {
                                             image::save_buffer_with_format(
                                                 skin_name_clone.clone() + ".png",
@@ -154,7 +161,7 @@ impl EventHandler for Handler {
                                             let form = get_form_base(skin_name_clone.clone())
                                                 .text("skinisuhd", "true");
                                             if let Err(err) = reqwest::blocking::Client::new()
-                                                .post("http://localhost/skins/edit/modify_skin.php")
+                                                .post(db_url + "edit/modify_skin.php")
                                                 .multipart(form)
                                                 .basic_auth(basic_auth_user_name, Some(basic_auth_password))
                                                 .send()
@@ -676,6 +683,7 @@ pub struct SkinUploadItem {
 
 pub struct SkinUploads {
     uploads: HashMap<UserId, SkinUploadItem>,
+    upload_lock: Arc<Mutex<()>>,
 }
 
 impl TypeMapKey for SkinUploads {
@@ -709,6 +717,7 @@ async fn main() {
 
     let skin_uploads = SkinUploads {
         uploads: Default::default(),
+        upload_lock: Default::default(),
     };
     client
         .data
