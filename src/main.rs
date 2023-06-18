@@ -1,15 +1,15 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
 use hashlink::LinkedHashMap;
 use image::{ColorType, ImageFormat};
-use serenity::all::{GuildId, Interaction, MessageId, Reaction, Ready, RoleId, UserId};
+use serenity::all::{GuildId, Interaction, Mention, MessageId, Reaction, Ready, RoleId, UserId};
 use serenity::async_trait;
 use serenity::builder::{
-    CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage,
-    EditInteractionResponse,
+    CreateAllowedMentions, CreateCommand, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse,
 };
 use serenity::framework::standard::StandardFramework;
 use serenity::prelude::*;
@@ -22,16 +22,17 @@ struct Handler;
 impl EventHandler for Handler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Interaction::Command(command) = interaction {
+            let guild_id = GuildId::new(
+                env::var("GUILD_ID")
+                    .expect("Expected GUILD_ID in environment")
+                    .parse()
+                    .expect("GUILD_ID must be an integer"),
+            );
             if command
                 .user
                 .has_role(
                     ctx.clone(),
-                    GuildId::new(
-                        env::var("GUILD_ID")
-                            .expect("Expected GUILD_ID in environment")
-                            .parse()
-                            .expect("GUILD_ID must be an integer"),
-                    ),
+                    guild_id,
                     RoleId::new(
                         env::var("ROLE_ID")
                             .expect("Expected ROLE_ID in environment")
@@ -91,6 +92,9 @@ impl EventHandler for Handler {
                                 }
 
                                 let errors: Arc<Mutex<Vec<String>>> = Default::default();
+                                let mut uploaded_skins_msg: String =
+                                    "The following skins were added to the database:\n".to_string();
+                                let mut uploaded_skin_users: HashSet<UserId> = Default::default();
                                 for (skin_name, skin_to_upload) in skins_to_upload.drain() {
                                     let author = skin_to_upload.author;
                                     let license = skin_to_upload.license;
@@ -170,8 +174,46 @@ impl EventHandler for Handler {
                                             }}
                                         ).await.unwrap();
 
-                                        tokio::fs::remove_file(skin_name + ".png").await.unwrap();
+                                        tokio::fs::remove_file(skin_name.clone() + ".png")
+                                            .await
+                                            .unwrap();
                                     }
+
+                                    if let Ok(msg) = command
+                                        .channel_id
+                                        .message(&ctx, skin_to_upload.original_msg_id)
+                                        .await
+                                    {
+                                        uploaded_skins_msg += &("- \"".to_string()
+                                            + &skin_name
+                                            + "\" ["
+                                            + &skin_to_upload.database.to_string()
+                                            + "] by "
+                                            + &Mention::User(msg.author.id).to_string()
+                                            + " ("
+                                            + &format!(
+                                                "https://discord.com/channels/{}/{}/{}",
+                                                guild_id.0, command.channel_id.0, msg.id.0
+                                            )
+                                            + ") \n");
+                                        uploaded_skin_users.insert(msg.author.id);
+                                    }
+                                }
+
+                                if let Err(err) = command
+                                    .channel_id
+                                    .send_message(
+                                        &ctx,
+                                        CreateMessage::new()
+                                            .allowed_mentions(
+                                                CreateAllowedMentions::new()
+                                                    .users(uploaded_skin_users),
+                                            )
+                                            .content(uploaded_skins_msg),
+                                    )
+                                    .await
+                                {
+                                    println!("sending global uploaded skins message failed {err}.");
                                 }
 
                                 let mut new_msg = String::default();
@@ -431,8 +473,14 @@ impl EventHandler for Handler {
                                                                                     &skin_name,
                                                                                 )
                                                                             {
-                                                                                item.skins_to_upload.insert(skin_name.clone(), SkinToUpload { author: author_name.clone(),
-                                                                                     license: license_name.clone(), file_256x128: Vec::new(), file_512x256: Vec::new(), database: msg_database.clone() });
+                                                                                item.skins_to_upload.insert(skin_name.clone(), SkinToUpload {
+                                                                                    author: author_name.clone(),
+                                                                                    license: license_name.clone(),
+                                                                                    file_256x128: Vec::new(),
+                                                                                    file_512x256: Vec::new(),
+                                                                                    database: msg_database.clone(),
+                                                                                    original_msg_id: msg_id,
+                                                                                });
                                                                             }
                                                                             if img_rgba.dimensions()
                                                                                 == (256, 128)
@@ -670,6 +718,7 @@ pub struct SkinToUpload {
     file_256x128: Vec<u8>,
     file_512x256: Vec<u8>,
     database: SkinToUploadDB,
+    original_msg_id: MessageId,
 }
 
 pub struct SkinUploadItem {
