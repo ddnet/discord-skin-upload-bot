@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use hashlink::LinkedHashMap;
 use image::{ColorType, ImageFormat};
-use serenity::all::{GuildId, Interaction, Mention, MessageId, Reaction, Ready, RoleId, UserId};
+use serenity::all::{
+    GuildId, Interaction, Mention, MessageId, Reaction, ReactionType, Ready, RoleId, UserId,
+};
 use serenity::async_trait;
 use serenity::builder::{
     CreateAllowedMentions, CreateCommand, CreateInteractionResponse,
@@ -50,15 +52,15 @@ impl EventHandler for Handler {
                 let basic_auth_password =
                     env::var("PASSWORD").expect("Expected PASSWORD for http auth in environment");
                 let main_cmd_str = "\
-                    You are about to upload a skin to the database.\n\
+                    You are about to upload skins to the database.\n\
                     Please react to all skins you want to upload:\n\
                     - React with ✅ to upload a skin to the normal database\n\
                     - React with ☑️ to upload a skin to the community database\n\
                     "
                 .to_string();
                 let main_cmd_end_str = "\
-                    Once you are done, use the command /upload_finish\n\
-                    If you want to cancel the upload, use /upload_cancel\n\
+                    Once you are done, use the command `/upload_finish`\n\
+                    If you want to cancel the upload, use `/upload_cancel`\n\
                     "
                 .to_string();
                 let content = match command.data.name.as_str() {
@@ -170,7 +172,7 @@ impl EventHandler for Handler {
                                                 .basic_auth(basic_auth_user_name, Some(basic_auth_password))
                                                 .send()
                                             {
-                                                errors_clone.blocking_lock().push(format!("There was an error while uploading {}.\nPlease manually check if this broke the database", err));
+                                                errors_clone.blocking_lock().push(format!("There was an error while uploading {}.\nPlease manually check if this broke the database\n", err));
                                             }}
                                         ).await.unwrap();
 
@@ -217,7 +219,7 @@ impl EventHandler for Handler {
                                 }
 
                                 let mut new_msg = String::default();
-                                new_msg += "Upload of skins finished.\n";
+                                new_msg += "Uploading the skins finished.\n";
                                 if !errors.lock().await.is_empty() {
                                     new_msg += "But there were the following errors:\n";
                                     for err in errors.lock().await.iter() {
@@ -236,7 +238,7 @@ impl EventHandler for Handler {
                             } else {
                                 let data = CreateInteractionResponseMessage::new()
                                     .content(
-                                        "Upload already in progress, wait for the previous to end",
+                                        "An upload is already in progress, wait for the previous to end",
                                     )
                                     .ephemeral(true);
                                 let builder = CreateInteractionResponse::Message(data);
@@ -247,7 +249,7 @@ impl EventHandler for Handler {
                             }
                         } else {
                             let data = CreateInteractionResponseMessage::new()
-                                .content("You never started an upload, please use /upload")
+                                .content("You never started an upload, please use `/upload`")
                                 .ephemeral(true);
                             let builder = CreateInteractionResponse::Message(data);
                             if let Err(why) = command.create_response(&ctx.http, builder).await {
@@ -473,6 +475,33 @@ impl EventHandler for Handler {
                                                                                     &skin_name,
                                                                                 )
                                                                             {
+                                                                                let mut
+                                                                                positive_count = 0;
+                                                                                let mut
+                                                                                negative_count = 0;
+                                                                                if let Ok(
+                                                                                    original_msg,
+                                                                                ) = command
+                                                                                    .channel_id
+                                                                                    .message(
+                                                                                        &ctx,
+                                                                                        msg_id,
+                                                                                    )
+                                                                                    .await
+                                                                                {
+                                                                                    original_msg.reactions.iter().for_each(|reaction| {
+                                                                                        if let ReactionType::Custom { animated: _, id, name: _ } = &reaction.reaction_type {
+                                                                                            // brownbear emoji id
+                                                                                            if id.0.get() == 346683497701834762 {
+                                                                                                positive_count = reaction.count - 1;
+                                                                                            }
+                                                                                            // cammostripes emoji id
+                                                                                            else if id.0.get() == 346683496476966913 {
+                                                                                                negative_count = reaction.count - 1;
+                                                                                            }
+                                                                                        }
+                                                                                    });
+                                                                                }
                                                                                 item.skins_to_upload.insert(skin_name.clone(), SkinToUpload {
                                                                                     author: author_name.clone(),
                                                                                     license: license_name.clone(),
@@ -480,6 +509,7 @@ impl EventHandler for Handler {
                                                                                     file_512x256: Vec::new(),
                                                                                     database: msg_database.clone(),
                                                                                     original_msg_id: msg_id,
+                                                                                    positive_ratio: if positive_count + negative_count > 0 { positive_count as f64 / (positive_count + negative_count) as f64 } else { 0.0 },
                                                                                 });
                                                                             }
                                                                             if img_rgba.dimensions()
@@ -560,6 +590,9 @@ impl EventHandler for Handler {
                                                 new_msg += " license: \"";
                                                 new_msg += &skin.license;
                                                 new_msg += &format!("\" (has 256x128 skin: {}, has 512x256 skin: {})", !skin.file_256x128.is_empty(), !skin.file_512x256.is_empty());
+                                                if skin.positive_ratio > 0.0 {
+                                                    new_msg += &format!(" -- positive ratio: {}", skin.positive_ratio);
+                                                }
                                                 new_msg += "\n";
                                             },
                                         );
@@ -719,6 +752,7 @@ pub struct SkinToUpload {
     file_512x256: Vec<u8>,
     database: SkinToUploadDB,
     original_msg_id: MessageId,
+    positive_ratio: f64,
 }
 
 pub struct SkinUploadItem {
