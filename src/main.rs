@@ -6,24 +6,327 @@ use std::time::Duration;
 use hashlink::LinkedHashMap;
 use image::{ColorType, ImageFormat};
 use serenity::all::{
-    GuildId, Interaction, Mention, MessageId, Reaction, ReactionType, Ready, RoleId, UserId,
+    ChannelId, CommandInteraction, ComponentInteraction, GuildId, Interaction, Mention, Message,
+    MessageId, Reaction, ReactionType, Ready, RoleId, UserId,
 };
 use serenity::async_trait;
 use serenity::builder::{
-    CreateAllowedMentions, CreateCommand, CreateInteractionResponse,
+    CreateAllowedMentions, CreateButton, CreateCommand, CreateEmbed, CreateInteractionResponse,
     CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse,
 };
 use serenity::framework::standard::StandardFramework;
+use serenity::model::Colour;
 use serenity::prelude::*;
 use tokio::select;
 use tokio::sync::Notify;
 
+enum CommandWrapper<'a> {
+    Cmd(&'a CommandInteraction),
+    Btn(&'a ComponentInteraction),
+}
+
+impl<'a> CommandWrapper<'a> {
+    async fn create_response(
+        &self,
+        cache_http: impl CacheHttp,
+        builder: CreateInteractionResponse,
+    ) -> anyhow::Result<()> {
+        match self {
+            CommandWrapper::Cmd(cmd) => Ok(cmd.create_response(cache_http, builder).await?),
+            CommandWrapper::Btn(btn) => Ok(btn.create_response(cache_http, builder).await?),
+        }
+    }
+
+    async fn edit_response(
+        &self,
+        cache_http: impl CacheHttp,
+        builder: EditInteractionResponse,
+    ) -> anyhow::Result<Message> {
+        match self {
+            CommandWrapper::Cmd(cmd) => Ok(cmd.edit_response(cache_http, builder).await?),
+            CommandWrapper::Btn(btn) => Ok(btn.edit_response(cache_http, builder).await?),
+        }
+    }
+
+    fn channel_id(&self) -> ChannelId {
+        match self {
+            CommandWrapper::Cmd(cmd) => cmd.channel_id,
+            CommandWrapper::Btn(btn) => btn.channel_id,
+        }
+    }
+}
+
+fn parse_skin_name(text: &String) -> anyhow::Result<String> {
+    let matches_text = regex::Regex::new("\"([A-Z0-9a-z_ ]+)\"").unwrap();
+    let caps = matches_text.captures(&text);
+    if caps.is_some() && caps.as_ref().unwrap().len() > 0 {
+        Ok(caps.unwrap().get(1).unwrap().as_str().to_string())
+    } else {
+        Err(anyhow::Error::msg(format!(
+            "name not found in msg: {}",
+            text
+        )))
+    }
+}
+
 struct Handler;
+
+impl Handler {
+    async fn upload_cancel<'a>(ctx: Context, user_id: UserId, command: &CommandWrapper<'a>) {
+        let mut data = ctx.data.write().await;
+        if let Some(item) = data
+            .get_mut::<SkinUploads>()
+            .unwrap()
+            .uploads
+            .get_mut(&user_id)
+        {
+            if let SkinUploadState::Collecting = item.state {
+                let data = CreateInteractionResponseMessage::new()
+                    .content("Skin upload cancelled")
+                    .ephemeral(true);
+                let builder = CreateInteractionResponse::Message(data);
+                if let Err(why) = command.create_response(&ctx.http, builder).await {
+                    println!("Could not respond to slash command: {why}");
+                }
+                item.state = SkinUploadState::Cancelled;
+                item.notify.notify_one();
+            } else {
+                let data = CreateInteractionResponseMessage::new()
+                    .content("Cannot cancel upload at this point anymore")
+                    .ephemeral(true);
+                let builder = CreateInteractionResponse::Message(data);
+                if let Err(why) = command.create_response(&ctx.http, builder).await {
+                    println!("Could not respond to slash command: {why}");
+                }
+            }
+        } else {
+            let data = CreateInteractionResponseMessage::new()
+                .content("You never started an upload using `/upload`.")
+                .ephemeral(true);
+            let builder = CreateInteractionResponse::Message(data);
+            if let Err(why) = command.create_response(&ctx.http, builder).await {
+                println!("Could not respond to slash command: {why}");
+            }
+        }
+    }
+
+    async fn upload_finish<'a>(ctx: Context, user_id: UserId, command: &CommandWrapper<'a>) {
+        let database_url =
+            env::var("DATABASE_URL").unwrap_or("https://ddnet.org/skins/".to_string());
+        let basic_auth_user_name =
+            env::var("USERNAME").expect("Expected USERNAME for http auth in environment");
+        let basic_auth_password =
+            env::var("PASSWORD").expect("Expected PASSWORD for http auth in environment");
+        let guild_id = GuildId::new(
+            env::var("GUILD_ID")
+                .expect("Expected GUILD_ID in environment")
+                .parse()
+                .expect("GUILD_ID must be an integer"),
+        );
+
+        let mut data = ctx.data.write().await;
+        if let Some(item) = data
+            .get_mut::<SkinUploads>()
+            .unwrap()
+            .uploads
+            .get_mut(&user_id)
+        {
+            if let SkinUploadState::Collecting = item.state {
+                item.state = SkinUploadState::Uploading;
+                item.notify.notify_one();
+
+                // let's upload
+                let mut skins_to_upload = item.skins_to_upload.clone();
+                let upload_lock = data.get_mut::<SkinUploads>().unwrap().upload_lock.clone();
+                drop(data);
+
+                let _g = upload_lock.lock().await;
+                let data = CreateInteractionResponseMessage::new()
+                    .content("Starting to upload")
+                    .ephemeral(true);
+                let builder = CreateInteractionResponse::Message(data);
+                if let Err(why) = command.create_response(&ctx.http, builder).await {
+                    println!("Could not respond to slash command: {why}");
+                }
+
+                let errors: Arc<Mutex<Vec<String>>> = Default::default();
+                let mut uploaded_skins_msg: String =
+                    "The following skins were added to the database:\n".to_string();
+                let mut uploaded_skin_users: HashSet<UserId> = Default::default();
+                let were_skins_uploaded = !skins_to_upload.is_empty();
+                for (skin_name, skin_to_upload) in skins_to_upload.drain() {
+                    let author = skin_to_upload.author;
+                    let license = skin_to_upload.license;
+                    let database = skin_to_upload.database.to_string();
+                    let get_form_base = Arc::new(move |img_name: String| {
+                        let mut form = reqwest::blocking::multipart::Form::new();
+                        form = form.file("image", img_name + ".png").unwrap();
+                        form = form.text("creator", author.clone());
+                        form = form.text("skin_pack", "");
+                        form = form.text("skin_license", license.clone());
+                        form = form.text("skin_type", database.clone());
+                        form = form.text("game_version", "tw-0.6");
+                        form = form.text("skin_part", "full");
+                        form = form.text("modifyaction", "add");
+                        form
+                    });
+
+                    if !skin_to_upload.file_256x128.is_empty() {
+                        let errors_clone = errors.clone();
+                        let skin_name_clone = skin_name.clone();
+                        let get_form_base_clone = get_form_base.clone();
+                        let basic_auth_user_name = basic_auth_user_name.clone();
+                        let basic_auth_password = basic_auth_password.clone();
+                        let db_url = database_url.clone();
+                        tokio::task::spawn_blocking(move || {
+                            image::save_buffer_with_format(
+                                skin_name_clone.clone() + ".png",
+                                &skin_to_upload.file_256x128,
+                                256,
+                                128,
+                                ColorType::Rgba8,
+                                ImageFormat::Png,
+                            )
+                            .unwrap();
+                            let form = get_form_base_clone(skin_name_clone.clone())
+                                .text("skinisuhd", "false");
+                            if let Err(err) = reqwest::blocking::Client::new()
+                                .post(db_url + "edit/modify_skin.php")
+                                .multipart(form)
+                                .basic_auth(basic_auth_user_name, Some(basic_auth_password))
+                                .send()
+                            {
+                                errors_clone.blocking_lock().push(format!("There was an error while uploading {}.\nPlease manually check if this broke the database", err));
+                            }
+                        }).await.unwrap();
+
+                        tokio::fs::remove_file(skin_name.clone() + ".png")
+                            .await
+                            .unwrap();
+                    }
+
+                    if !skin_to_upload.file_512x256.is_empty() {
+                        let errors_clone = errors.clone();
+                        let skin_name_clone = skin_name.clone();
+                        let basic_auth_user_name = basic_auth_user_name.clone();
+                        let basic_auth_password = basic_auth_password.clone();
+                        let db_url = database_url.clone();
+                        tokio::task::spawn_blocking(move || {
+                            image::save_buffer_with_format(
+                                skin_name_clone.clone() + ".png",
+                                &skin_to_upload.file_512x256,
+                                512,
+                                256,
+                                ColorType::Rgba8,
+                                ImageFormat::Png,
+                            )
+                            .unwrap();
+                            let form = get_form_base(skin_name_clone.clone())
+                                .text("skinisuhd", "true");
+                            if let Err(err) = reqwest::blocking::Client::new()
+                                .post(db_url + "edit/modify_skin.php")
+                                .multipart(form)
+                                .basic_auth(basic_auth_user_name, Some(basic_auth_password))
+                                .send()
+                            {
+                                errors_clone.blocking_lock().push(format!("There was an error while uploading {}.\nPlease manually check if this broke the database\n", err));
+                            }}
+                        ).await.unwrap();
+
+                        tokio::fs::remove_file(skin_name.clone() + ".png")
+                            .await
+                            .unwrap();
+                    }
+
+                    if let Ok(msg) = command
+                        .channel_id()
+                        .message(&ctx, skin_to_upload.original_msg_id)
+                        .await
+                    {
+                        uploaded_skins_msg += &("- \"".to_string()
+                            + &skin_name
+                            + "\" ["
+                            + &skin_to_upload.database.to_string()
+                            + "] by "
+                            + &Mention::User(msg.author.id).to_string()
+                            + " ("
+                            + &format!(
+                                "https://discord.com/channels/{}/{}/{}",
+                                guild_id.0,
+                                command.channel_id().0,
+                                msg.id.0
+                            )
+                            + ") \n");
+                        uploaded_skin_users.insert(msg.author.id);
+                    }
+                }
+
+                if were_skins_uploaded {
+                    if let Err(err) = command
+                        .channel_id()
+                        .send_message(
+                            &ctx,
+                            CreateMessage::new()
+                                .allowed_mentions(
+                                    CreateAllowedMentions::new().users(uploaded_skin_users),
+                                )
+                                .content(uploaded_skins_msg),
+                        )
+                        .await
+                    {
+                        println!("sending global uploaded skins message failed {err}.");
+                    }
+                }
+
+                let mut new_msg = String::default();
+                new_msg += "Uploading the skins finished.\n";
+                if !errors.lock().await.is_empty() {
+                    new_msg += "But there were the following errors:\n";
+                    for err in errors.lock().await.iter() {
+                        new_msg += &(err.clone() + "\n");
+                    }
+                }
+                if let Err(err) = command
+                    .edit_response(&ctx, EditInteractionResponse::new().content(new_msg))
+                    .await
+                {
+                    println!("Could edit responds of upload finish: {err}");
+                }
+            } else {
+                let data = CreateInteractionResponseMessage::new()
+                    .content("An upload is already in progress, wait for the previous to end")
+                    .ephemeral(true);
+                let builder = CreateInteractionResponse::Message(data);
+                if let Err(why) = command.create_response(&ctx.http, builder).await {
+                    println!("Could not respond to slash command: {why}");
+                }
+            }
+        } else {
+            let data = CreateInteractionResponseMessage::new()
+                .content("You never started an upload, please use `/upload`")
+                .ephemeral(true);
+            let builder = CreateInteractionResponse::Message(data);
+            if let Err(why) = command.create_response(&ctx.http, builder).await {
+                println!("Could not respond to slash command: {why}");
+            }
+        }
+    }
+}
 
 #[async_trait]
 impl EventHandler for Handler {
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        if let Interaction::Command(command) = interaction {
+        if let Interaction::Component(comp) = interaction {
+            match comp.data.custom_id.as_str() {
+                "cancel" => {
+                    Self::upload_cancel(ctx, comp.user.id, &CommandWrapper::Btn(&comp)).await;
+                }
+                "ok" => {
+                    Self::upload_finish(ctx, comp.user.id, &CommandWrapper::Btn(&comp)).await;
+                }
+                _ => {}
+            }
+        } else if let Interaction::Command(command) = interaction {
             let guild_id = GuildId::new(
                 env::var("GUILD_ID")
                     .expect("Expected GUILD_ID in environment")
@@ -45,257 +348,42 @@ impl EventHandler for Handler {
                 .await
                 .unwrap_or(false)
             {
-                let database_url =
-                    env::var("DATABASE_URL").unwrap_or("https://ddnet.org/skins/".to_string());
-                let basic_auth_user_name =
-                    env::var("USERNAME").expect("Expected USERNAME for http auth in environment");
-                let basic_auth_password =
-                    env::var("PASSWORD").expect("Expected PASSWORD for http auth in environment");
-                let main_cmd_str = "\
-                    You are about to upload skins to the database.\n\
-                    Please react to all skins you want to upload:\n\
-                    - React with ✅ to upload a skin to the normal database\n\
-                    - React with ☑️ to upload a skin to the community database\n\
-                    "
-                .to_string();
-                let main_cmd_end_str = "\
-                    Once you are done, use the command `/upload_finish`\n\
-                    If you want to cancel the upload, use `/upload_cancel`\n\
-                    "
-                .to_string();
+                let main_cmd_str = Mention::User(command.user.id).to_string()
+                    + "\n\
+                    __**:art: You are about to upload skins to the database.**__\n\n\
+                    ";
+                let main_cmd_embed = CreateEmbed::new().color(Colour::TEAL).field(
+                    "Please react to all skins you want to upload:",
+                    "\
+                        - React with ✅ to upload a skin to the normal database\n\
+                        - React with ☑️ to upload a skin to the community database\n",
+                    false,
+                );
+                let main_cmd_end_embed = CreateEmbed::new().color(Colour::ORANGE).field(
+                    "",
+                    "\
+                    Once you are done, use the 🆗 button or the command `/upload_finish`\n\
+                    To cancel the upload, use the 🇽 button or the command `/upload_cancel`\n",
+                    false,
+                );
                 let content = match command.data.name.as_str() {
-                    "upload" => Some(main_cmd_str.clone() + &main_cmd_end_str),
+                    "upload" => Some(main_cmd_str.clone()),
                     "upload_finish" => {
-                        let mut data = ctx.data.write().await;
-                        if let Some(item) = data
-                            .get_mut::<SkinUploads>()
-                            .unwrap()
-                            .uploads
-                            .get_mut(&command.user.id)
-                        {
-                            if let SkinUploadState::Collecting = item.state {
-                                item.state = SkinUploadState::Uploading;
-                                item.notify.notify_one();
-
-                                // let's upload
-                                let mut skins_to_upload = item.skins_to_upload.clone();
-                                let upload_lock =
-                                    data.get_mut::<SkinUploads>().unwrap().upload_lock.clone();
-                                drop(data);
-
-                                let _g = upload_lock.lock().await;
-                                let data = CreateInteractionResponseMessage::new()
-                                    .content("Starting to upload")
-                                    .ephemeral(true);
-                                let builder = CreateInteractionResponse::Message(data);
-                                if let Err(why) = command.create_response(&ctx.http, builder).await
-                                {
-                                    println!("Could not respond to slash command: {why}");
-                                }
-
-                                let errors: Arc<Mutex<Vec<String>>> = Default::default();
-                                let mut uploaded_skins_msg: String =
-                                    "The following skins were added to the database:\n".to_string();
-                                let mut uploaded_skin_users: HashSet<UserId> = Default::default();
-                                for (skin_name, skin_to_upload) in skins_to_upload.drain() {
-                                    let author = skin_to_upload.author;
-                                    let license = skin_to_upload.license;
-                                    let database = skin_to_upload.database.to_string();
-                                    let get_form_base = Arc::new(move |img_name: String| {
-                                        let mut form = reqwest::blocking::multipart::Form::new();
-                                        form = form.file("image", img_name + ".png").unwrap();
-                                        form = form.text("creator", author.clone());
-                                        form = form.text("skin_pack", "");
-                                        form = form.text("skin_license", license.clone());
-                                        form = form.text("skin_type", database.clone());
-                                        form = form.text("game_version", "tw-0.6");
-                                        form = form.text("skin_part", "full");
-                                        form = form.text("modifyaction", "add");
-                                        form
-                                    });
-
-                                    if !skin_to_upload.file_256x128.is_empty() {
-                                        let errors_clone = errors.clone();
-                                        let skin_name_clone = skin_name.clone();
-                                        let get_form_base_clone = get_form_base.clone();
-                                        let basic_auth_user_name = basic_auth_user_name.clone();
-                                        let basic_auth_password = basic_auth_password.clone();
-                                        let db_url = database_url.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            image::save_buffer_with_format(
-                                                skin_name_clone.clone() + ".png",
-                                                &skin_to_upload.file_256x128,
-                                                256,
-                                                128,
-                                                ColorType::Rgba8,
-                                                ImageFormat::Png,
-                                            )
-                                            .unwrap();
-                                            let form = get_form_base_clone(skin_name_clone.clone())
-                                                .text("skinisuhd", "false");
-                                            if let Err(err) = reqwest::blocking::Client::new()
-                                                .post(db_url + "edit/modify_skin.php")
-                                                .multipart(form)
-                                                .basic_auth(basic_auth_user_name, Some(basic_auth_password))
-                                                .send()
-                                            {
-                                                errors_clone.blocking_lock().push(format!("There was an error while uploading {}.\nPlease manually check if this broke the database", err));
-                                            }
-                                        }).await.unwrap();
-
-                                        tokio::fs::remove_file(skin_name.clone() + ".png")
-                                            .await
-                                            .unwrap();
-                                    }
-
-                                    if !skin_to_upload.file_512x256.is_empty() {
-                                        let errors_clone = errors.clone();
-                                        let skin_name_clone = skin_name.clone();
-                                        let basic_auth_user_name = basic_auth_user_name.clone();
-                                        let basic_auth_password = basic_auth_password.clone();
-                                        let db_url = database_url.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            image::save_buffer_with_format(
-                                                skin_name_clone.clone() + ".png",
-                                                &skin_to_upload.file_512x256,
-                                                512,
-                                                256,
-                                                ColorType::Rgba8,
-                                                ImageFormat::Png,
-                                            )
-                                            .unwrap();
-                                            let form = get_form_base(skin_name_clone.clone())
-                                                .text("skinisuhd", "true");
-                                            if let Err(err) = reqwest::blocking::Client::new()
-                                                .post(db_url + "edit/modify_skin.php")
-                                                .multipart(form)
-                                                .basic_auth(basic_auth_user_name, Some(basic_auth_password))
-                                                .send()
-                                            {
-                                                errors_clone.blocking_lock().push(format!("There was an error while uploading {}.\nPlease manually check if this broke the database\n", err));
-                                            }}
-                                        ).await.unwrap();
-
-                                        tokio::fs::remove_file(skin_name.clone() + ".png")
-                                            .await
-                                            .unwrap();
-                                    }
-
-                                    if let Ok(msg) = command
-                                        .channel_id
-                                        .message(&ctx, skin_to_upload.original_msg_id)
-                                        .await
-                                    {
-                                        uploaded_skins_msg += &("- \"".to_string()
-                                            + &skin_name
-                                            + "\" ["
-                                            + &skin_to_upload.database.to_string()
-                                            + "] by "
-                                            + &Mention::User(msg.author.id).to_string()
-                                            + " ("
-                                            + &format!(
-                                                "https://discord.com/channels/{}/{}/{}",
-                                                guild_id.0, command.channel_id.0, msg.id.0
-                                            )
-                                            + ") \n");
-                                        uploaded_skin_users.insert(msg.author.id);
-                                    }
-                                }
-
-                                if let Err(err) = command
-                                    .channel_id
-                                    .send_message(
-                                        &ctx,
-                                        CreateMessage::new()
-                                            .allowed_mentions(
-                                                CreateAllowedMentions::new()
-                                                    .users(uploaded_skin_users),
-                                            )
-                                            .content(uploaded_skins_msg),
-                                    )
-                                    .await
-                                {
-                                    println!("sending global uploaded skins message failed {err}.");
-                                }
-
-                                let mut new_msg = String::default();
-                                new_msg += "Uploading the skins finished.\n";
-                                if !errors.lock().await.is_empty() {
-                                    new_msg += "But there were the following errors:\n";
-                                    for err in errors.lock().await.iter() {
-                                        new_msg += &(err.clone() + "\n");
-                                    }
-                                }
-                                if let Err(err) = command
-                                    .edit_response(
-                                        &ctx,
-                                        EditInteractionResponse::new().content(new_msg),
-                                    )
-                                    .await
-                                {
-                                    println!("Could edit responds of upload finish: {err}");
-                                }
-                            } else {
-                                let data = CreateInteractionResponseMessage::new()
-                                    .content(
-                                        "An upload is already in progress, wait for the previous to end",
-                                    )
-                                    .ephemeral(true);
-                                let builder = CreateInteractionResponse::Message(data);
-                                if let Err(why) = command.create_response(&ctx.http, builder).await
-                                {
-                                    println!("Could not respond to slash command: {why}");
-                                }
-                            }
-                        } else {
-                            let data = CreateInteractionResponseMessage::new()
-                                .content("You never started an upload, please use `/upload`")
-                                .ephemeral(true);
-                            let builder = CreateInteractionResponse::Message(data);
-                            if let Err(why) = command.create_response(&ctx.http, builder).await {
-                                println!("Could not respond to slash command: {why}");
-                            }
-                        }
+                        Self::upload_finish(
+                            ctx.clone(),
+                            command.user.id,
+                            &CommandWrapper::Cmd(&command),
+                        )
+                        .await;
                         return;
                     }
                     "upload_cancel" => {
-                        let mut data = ctx.data.write().await;
-                        if let Some(item) = data
-                            .get_mut::<SkinUploads>()
-                            .unwrap()
-                            .uploads
-                            .get_mut(&command.user.id)
-                        {
-                            if let SkinUploadState::Collecting = item.state {
-                                let data = CreateInteractionResponseMessage::new()
-                                    .content("Skin upload cancelled")
-                                    .ephemeral(true);
-                                let builder = CreateInteractionResponse::Message(data);
-                                if let Err(why) = command.create_response(&ctx.http, builder).await
-                                {
-                                    println!("Could not respond to slash command: {why}");
-                                }
-                                item.state = SkinUploadState::Cancelled;
-                                item.notify.notify_one();
-                            } else {
-                                let data = CreateInteractionResponseMessage::new()
-                                    .content("Cannot cancel upload at this point anymore")
-                                    .ephemeral(true);
-                                let builder = CreateInteractionResponse::Message(data);
-                                if let Err(why) = command.create_response(&ctx.http, builder).await
-                                {
-                                    println!("Could not respond to slash command: {why}");
-                                }
-                            }
-                        } else {
-                            let data = CreateInteractionResponseMessage::new()
-                                .content("You never started an upload using `/upload`.")
-                                .ephemeral(true);
-                            let builder = CreateInteractionResponse::Message(data);
-                            if let Err(why) = command.create_response(&ctx.http, builder).await {
-                                println!("Could not respond to slash command: {why}");
-                            }
-                        }
+                        Self::upload_cancel(
+                            ctx.clone(),
+                            command.user.id,
+                            &CommandWrapper::Cmd(&command),
+                        )
+                        .await;
                         return;
                     }
                     _ => None,
@@ -323,7 +411,15 @@ impl EventHandler for Handler {
                 if let Some(content) = content {
                     let data = CreateInteractionResponseMessage::new()
                         .content(content)
-                        .ephemeral(true);
+                        .ephemeral(true)
+                        .add_embeds(vec![main_cmd_embed, main_cmd_end_embed])
+                        .button(
+                            CreateButton::new("ok").emoji(ReactionType::Unicode("🆗".to_string())),
+                        )
+                        .button(
+                            CreateButton::new("cancel")
+                                .emoji(ReactionType::Unicode("🇽".to_string())),
+                        );
                     let builder = CreateInteractionResponse::Message(data);
                     if let Err(why) = command.create_response(&ctx.http, builder).await {
                         println!("Could not respond to slash command: {why}");
@@ -375,39 +471,28 @@ impl EventHandler for Handler {
                                                 {
                                                     let text = skin_msg.content;
                                                     let mut all_required_info = true;
-                                                    let mut skin_name = String::default();
+                                                    let mut skin_name = Default::default();
                                                     let mut author_name = String::default();
                                                     let mut license_name = String::default();
-                                                    let matches_text =
-                                                        regex::Regex::new("\"([A-Z0-9a-z_ ]+)\"")
-                                                            .unwrap();
-                                                    let caps = matches_text.captures(&text);
-                                                    if caps.is_some()
-                                                        && caps.as_ref().unwrap().len() > 0
-                                                    {
-                                                        skin_name = caps
-                                                            .unwrap()
-                                                            .get(1)
-                                                            .unwrap()
-                                                            .as_str()
-                                                            .to_string();
-                                                        if let Some(skin) =
-                                                            item.skins_to_upload.get(&skin_name)
-                                                        {
-                                                            if skin.database != msg_database {
-                                                                item.errors.push_back(format!(
+                                                    match parse_skin_name(&text) {
+                                                        Ok(skin_name_res) => {
+                                                            skin_name = skin_name_res;
+                                                            if let Some(skin) =
+                                                                item.skins_to_upload.get(&skin_name)
+                                                            {
+                                                                if skin.database != msg_database {
+                                                                    item.errors.push_back(format!(
                                                                     "you changed the database upload type of: {}. If you did a mistake cancel the upload and try again.",
                                                                     skin_name
                                                                 ));
-                                                                all_required_info = false;
+                                                                    all_required_info = false;
+                                                                }
                                                             }
                                                         }
-                                                    } else {
-                                                        item.errors.push_back(format!(
-                                                            "name not found in msg: {}",
-                                                            text
-                                                        ));
-                                                        all_required_info = false;
+                                                        Err(err) => {
+                                                            item.errors.push_back(err.to_string());
+                                                            all_required_info = false;
+                                                        }
                                                     }
                                                     let matches_text = regex::Regex::new(
                                                         "by ([A-Z0-9a-z_ -]+) \\(",
@@ -573,10 +658,10 @@ impl EventHandler for Handler {
                                         });
                                     }
                                     if !item.skins_to_upload.is_empty() {
-                                        new_msg += "Skins to upload:\n";
+                                        new_msg += "__Skins to upload:__\n";
                                         item.skins_to_upload.iter().for_each(
                                             |(skin_name, skin)| {
-                                                new_msg += "- ";
+                                                new_msg += "> - ";
                                                 if let SkinToUploadDB::Normal = &skin.database  {
                                                     new_msg += "✅ ";
                                                 }
@@ -597,7 +682,6 @@ impl EventHandler for Handler {
                                             },
                                         );
                                     }
-                                    new_msg += &main_cmd_end_str;
                                     if let Err(err) = command
                                         .edit_response(
                                             ctx.clone(),
@@ -663,31 +747,88 @@ impl EventHandler for Handler {
                 skin_upload
                     .reaction_list
                     .insert(add_reaction.message_id, add_reaction.user_id.unwrap());
+                if let Ok(msg) = add_reaction.message(&ctx).await {
+                    if let Err(_) = msg
+                        .delete_reaction_emoji(&ctx, ReactionType::Unicode("☑️".to_string()))
+                        .await
+                    {
+                        println!("no permissions to delete reaction");
+                    }
+                    // remove the already inserted skin, if any
+                    if let Ok(skin_name) = parse_skin_name(&msg.content) {
+                        skin_upload.skins_to_upload.remove(&skin_name);
+                    }
+                }
                 skin_upload
                     .skins_try_upload
                     .insert(add_reaction.message_id, SkinToUploadDB::Normal);
                 skin_upload.notify.notify_one();
             }
-        } else {
-            if add_reaction.emoji.unicode_eq("☑️") {
-                if let Some(skin_upload) = ctx
-                    .clone()
-                    .data
-                    .write()
-                    .await
-                    .get_mut::<SkinUploads>()
-                    .unwrap()
-                    .uploads
-                    .get_mut(&add_reaction.user_id.unwrap())
-                {
-                    skin_upload
-                        .reaction_list
-                        .insert(add_reaction.message_id, add_reaction.user_id.unwrap());
-                    skin_upload
-                        .skins_try_upload
-                        .insert(add_reaction.message_id, SkinToUploadDB::Community);
-                    skin_upload.notify.notify_one();
+        } else if add_reaction.emoji.unicode_eq("☑️") {
+            if let Some(skin_upload) = ctx
+                .clone()
+                .data
+                .write()
+                .await
+                .get_mut::<SkinUploads>()
+                .unwrap()
+                .uploads
+                .get_mut(&add_reaction.user_id.unwrap())
+            {
+                skin_upload
+                    .reaction_list
+                    .insert(add_reaction.message_id, add_reaction.user_id.unwrap());
+                if let Ok(msg) = add_reaction.message(&ctx).await {
+                    if let Err(_) = msg
+                        .delete_reaction_emoji(&ctx, ReactionType::Unicode("✅".to_string()))
+                        .await
+                    {
+                        println!("no permissions to delete reaction");
+                    }
+                    // remove the already inserted skin, if any
+                    if let Ok(skin_name) = parse_skin_name(&msg.content) {
+                        skin_upload.skins_to_upload.remove(&skin_name);
+                    }
                 }
+                skin_upload
+                    .reaction_list
+                    .insert(add_reaction.message_id, add_reaction.user_id.unwrap());
+                skin_upload
+                    .skins_try_upload
+                    .insert(add_reaction.message_id, SkinToUploadDB::Community);
+                skin_upload.notify.notify_one();
+            }
+        }
+    }
+
+    async fn reaction_remove(&self, ctx: Context, removed_reaction: Reaction) {
+        if !removed_reaction.user_id.is_some() {
+            return;
+        }
+        if removed_reaction.emoji.unicode_eq("✅") || removed_reaction.emoji.unicode_eq("☑️") {
+            if let Some(skin_upload) = ctx
+                .clone()
+                .data
+                .write()
+                .await
+                .get_mut::<SkinUploads>()
+                .unwrap()
+                .uploads
+                .get_mut(&removed_reaction.user_id.unwrap())
+            {
+                skin_upload
+                    .reaction_list
+                    .remove(&removed_reaction.message_id);
+                if let Ok(msg) = removed_reaction.message(&ctx).await {
+                    // remove the already inserted skin, if any
+                    if let Ok(skin_name) = parse_skin_name(&msg.content) {
+                        skin_upload.skins_to_upload.remove(&skin_name);
+                    }
+                }
+                skin_upload
+                    .skins_try_upload
+                    .remove(&removed_reaction.message_id);
+                skin_upload.notify.notify_one();
             }
         }
     }

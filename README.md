@@ -6,3 +6,7 @@ commands:
 - /upload
 - /upload_finish
 - /upload_cancel
+
+permissions:
+- send messages
+- edit messages (for reactions only)
