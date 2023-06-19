@@ -56,15 +56,19 @@ impl<'a> CommandWrapper<'a> {
     }
 }
 
-fn parse_skin_name(text: &String) -> anyhow::Result<String> {
-    let matches_text = regex::Regex::new("\"([A-Z0-9a-z_ ]+)\"").unwrap();
+fn parse_skin_info(text: &String) -> anyhow::Result<(String, String, String)> {
+    let matches_text = regex::Regex::new("\"(.+)\" by (.+) \\((.+)\\)").unwrap();
     let caps = matches_text.captures(&text);
-    if caps.is_some() && caps.as_ref().unwrap().len() > 0 {
-        Ok(caps.unwrap().get(1).unwrap().as_str().to_string())
+    if caps.is_some() && caps.as_ref().unwrap().len() > 2 {
+        Ok((
+            caps.as_ref().unwrap().get(1).unwrap().as_str().to_string(),
+            caps.as_ref().unwrap().get(2).unwrap().as_str().to_string(),
+            caps.as_ref().unwrap().get(3).unwrap().as_str().to_string(),
+        ))
     } else {
         Err(anyhow::Error::msg(format!(
-            "name not found in msg: {}",
-            text
+            "name, author or license not found in msg: {}",
+            text.replace("\n", "")
         )))
     }
 }
@@ -474,9 +478,15 @@ impl EventHandler for Handler {
                                                     let mut skin_name = Default::default();
                                                     let mut author_name = String::default();
                                                     let mut license_name = String::default();
-                                                    match parse_skin_name(&text) {
-                                                        Ok(skin_name_res) => {
+                                                    match parse_skin_info(&text) {
+                                                        Ok((
+                                                            skin_name_res,
+                                                            author_name_res,
+                                                            license_name_res,
+                                                        )) => {
                                                             skin_name = skin_name_res;
+                                                            author_name = author_name_res;
+                                                            license_name = license_name_res;
                                                             if let Some(skin) =
                                                                 item.skins_to_upload.get(&skin_name)
                                                             {
@@ -493,48 +503,6 @@ impl EventHandler for Handler {
                                                             item.errors.push_back(err.to_string());
                                                             all_required_info = false;
                                                         }
-                                                    }
-                                                    let matches_text = regex::Regex::new(
-                                                        "by ([A-Z0-9a-z_ -]+) \\(",
-                                                    )
-                                                    .unwrap();
-                                                    let caps = matches_text.captures(&text);
-                                                    if caps.is_some()
-                                                        && caps.as_ref().unwrap().len() > 0
-                                                    {
-                                                        author_name = caps
-                                                            .unwrap()
-                                                            .get(1)
-                                                            .unwrap()
-                                                            .as_str()
-                                                            .to_string();
-                                                    } else {
-                                                        item.errors.push_back(format!(
-                                                            "author not found in msg: {}",
-                                                            text
-                                                        ));
-                                                        all_required_info = false;
-                                                    }
-                                                    let matches_text = regex::Regex::new(
-                                                        "\\(([A-Z0-9a-z_ -]+)\\)",
-                                                    )
-                                                    .unwrap();
-                                                    let caps = matches_text.captures(&text);
-                                                    if caps.is_some()
-                                                        && caps.as_ref().unwrap().len() > 0
-                                                    {
-                                                        license_name = caps
-                                                            .unwrap()
-                                                            .get(1)
-                                                            .unwrap()
-                                                            .as_str()
-                                                            .to_string();
-                                                    } else {
-                                                        item.errors.push_back(format!(
-                                                            "license not found in msg: {}",
-                                                            text
-                                                        ));
-                                                        all_required_info = false;
                                                     }
                                                     if all_required_info {
                                                         for attachment in
@@ -650,9 +618,9 @@ impl EventHandler for Handler {
                                     // edit msg
                                     let mut new_msg = main_cmd_str.clone();
                                     if !item.errors.is_empty() {
-                                        new_msg += "**Errors**:\n";
+                                        new_msg += "__**Errors**__:\n";
                                         item.errors.iter().for_each(|err| {
-                                            new_msg += "- ";
+                                            new_msg += "> - ";
                                             new_msg += &err;
                                             new_msg += "\n";
                                         });
@@ -668,16 +636,22 @@ impl EventHandler for Handler {
                                                 else{
                                                     new_msg += "☑️ ";
                                                 }
-                                                new_msg += "\"";
+                                                new_msg += "`";
                                                 new_msg += skin_name;
-                                                new_msg += "\" by ";
+                                                new_msg += "` by `";
                                                 new_msg += &skin.author;
-                                                new_msg += " license: \"";
+                                                new_msg += "` license: `";
                                                 new_msg += &skin.license;
-                                                new_msg += &format!("\" (has 256x128 skin: {}, has 512x256 skin: {})", !skin.file_256x128.is_empty(), !skin.file_512x256.is_empty());
+                                                new_msg += &format!("` (has 256x128 skin: {}, has 512x256 skin: {})", !skin.file_256x128.is_empty(), !skin.file_512x256.is_empty());
                                                 if skin.positive_ratio > 0.0 {
-                                                    new_msg += &format!(" -- positive ratio: {}%", skin.positive_ratio * 100.0);
+                                                    new_msg += &format!(" - positive ratio: {}%", skin.positive_ratio * 100.0);
                                                 }
+                                                new_msg += &format!(
+                                                    " https://discord.com/channels/{}/{}/{}",
+                                                    guild_id.0,
+                                                    command.channel_id.0,
+                                                    skin.original_msg_id.0
+                                                );
                                                 new_msg += "\n";
                                             },
                                         );
@@ -755,7 +729,7 @@ impl EventHandler for Handler {
                         println!("no permissions to delete reaction");
                     }
                     // remove the already inserted skin, if any
-                    if let Ok(skin_name) = parse_skin_name(&msg.content) {
+                    if let Ok((skin_name, _, _)) = parse_skin_info(&msg.content) {
                         skin_upload.skins_to_upload.remove(&skin_name);
                     }
                 }
@@ -786,7 +760,7 @@ impl EventHandler for Handler {
                         println!("no permissions to delete reaction");
                     }
                     // remove the already inserted skin, if any
-                    if let Ok(skin_name) = parse_skin_name(&msg.content) {
+                    if let Ok((skin_name, _, _)) = parse_skin_info(&msg.content) {
                         skin_upload.skins_to_upload.remove(&skin_name);
                     }
                 }
@@ -821,7 +795,7 @@ impl EventHandler for Handler {
                     .remove(&removed_reaction.message_id);
                 if let Ok(msg) = removed_reaction.message(&ctx).await {
                     // remove the already inserted skin, if any
-                    if let Ok(skin_name) = parse_skin_name(&msg.content) {
+                    if let Ok((skin_name, _, _)) = parse_skin_info(&msg.content) {
                         skin_upload.skins_to_upload.remove(&skin_name);
                     }
                 }
