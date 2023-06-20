@@ -154,8 +154,9 @@ impl Handler {
                 }
 
                 let errors: Arc<Mutex<Vec<String>>> = Default::default();
-                let mut uploaded_skins_msg: String =
-                    "The following skins were added to the database:\n".to_string();
+                let mut uploaded_skins_msg: Vec<String> = Default::default();
+                uploaded_skins_msg
+                    .push("The following skins were added to the database:\n".to_string());
                 let mut uploaded_skin_users: HashSet<UserId> = Default::default();
                 let were_skins_uploaded = !skins_to_upload.is_empty();
                 for (skin_name, skin_to_upload) in skins_to_upload.drain() {
@@ -247,7 +248,7 @@ impl Handler {
                         .message(&ctx, skin_to_upload.original_msg_id)
                         .await
                     {
-                        uploaded_skins_msg += &("- \"".to_string()
+                        let skin_msg = "- \"".to_string()
                             + &skin_name
                             + "\" ["
                             + &skin_to_upload.database.to_string()
@@ -260,25 +261,36 @@ impl Handler {
                                 command.channel_id().0,
                                 msg.id.0
                             )
-                            + ") \n");
+                            + ") \n";
+                        if uploaded_skins_msg.last().unwrap().chars().count()
+                            + skin_msg.chars().count()
+                            <= 2000
+                        {
+                            *uploaded_skins_msg.last_mut().unwrap() += &skin_msg;
+                        } else {
+                            uploaded_skins_msg.push(skin_msg);
+                        }
                         uploaded_skin_users.insert(msg.author.id);
                     }
                 }
 
                 if were_skins_uploaded {
-                    if let Err(err) = command
-                        .channel_id()
-                        .send_message(
-                            &ctx,
-                            CreateMessage::new()
-                                .allowed_mentions(
-                                    CreateAllowedMentions::new().users(uploaded_skin_users),
-                                )
-                                .content(uploaded_skins_msg),
-                        )
-                        .await
-                    {
-                        println!("sending global uploaded skins message failed {err}.");
+                    for upload_msg in uploaded_skins_msg.iter() {
+                        if let Err(err) = command
+                            .channel_id()
+                            .send_message(
+                                &ctx,
+                                CreateMessage::new()
+                                    .allowed_mentions(
+                                        CreateAllowedMentions::new()
+                                            .users(uploaded_skin_users.clone()),
+                                    )
+                                    .content(upload_msg),
+                            )
+                            .await
+                        {
+                            println!("sending global uploaded skins message failed {err}.");
+                        }
                     }
                 }
 
@@ -629,32 +641,81 @@ impl EventHandler for Handler {
                                         new_msg += "__Skins to upload:__\n";
                                         item.skins_to_upload.iter().for_each(
                                             |(skin_name, skin)| {
-                                                new_msg += "> - ";
+                                                let mut add_msg = "> - ".to_string();
                                                 if let SkinToUploadDB::Normal = &skin.database  {
-                                                    new_msg += "✅ ";
+                                                    add_msg += "✅ ";
                                                 }
                                                 else{
-                                                    new_msg += "☑️ ";
+                                                    add_msg += "☑️ ";
                                                 }
-                                                new_msg += "`";
-                                                new_msg += skin_name;
-                                                new_msg += "` by `";
-                                                new_msg += &skin.author;
-                                                new_msg += "` license: `";
-                                                new_msg += &skin.license;
-                                                new_msg += &format!("` (has 256x128 skin: {}, has 512x256 skin: {})", !skin.file_256x128.is_empty(), !skin.file_512x256.is_empty());
+                                                add_msg += "`";
+                                                add_msg += skin_name;
+                                                add_msg += "` by `";
+                                                add_msg += &skin.author;
+                                                add_msg += "` license: `";
+                                                add_msg += &skin.license;
+                                                add_msg += &format!("` (has 256x128 skin: {}, has 512x256 skin: {})", !skin.file_256x128.is_empty(), !skin.file_512x256.is_empty());
                                                 if skin.positive_ratio > 0.0 {
-                                                    new_msg += &format!(" - positive ratio: {}%", skin.positive_ratio * 100.0);
+                                                    add_msg += &format!(" - positive ratio: {}%", skin.positive_ratio * 100.0);
                                                 }
-                                                new_msg += &format!(
+                                                add_msg += &format!(
                                                     " https://discord.com/channels/{}/{}/{}",
                                                     guild_id.0,
                                                     command.channel_id.0,
                                                     skin.original_msg_id.0
                                                 );
-                                                new_msg += "\n";
+                                                add_msg += "\n";
+                                                new_msg += &add_msg;
                                             },
                                         );
+                                    }
+
+                                    if new_msg.chars().count() >= 2000 {
+                                        // try a compact view
+                                        new_msg = main_cmd_str.clone();
+                                        if !item.errors.is_empty() {
+                                            new_msg += &format!(
+                                                "There are {} errors\n",
+                                                item.errors.len()
+                                            );
+                                        }
+                                        if !item.skins_to_upload.is_empty() {
+                                            new_msg += "Upload:\n";
+                                            item.skins_to_upload.iter().for_each(
+                                                |(skin_name, skin)| {
+                                                    let mut add_msg = "".to_string();
+                                                    if let SkinToUploadDB::Normal = &skin.database {
+                                                        add_msg += "✅ ";
+                                                    } else {
+                                                        add_msg += "☑️ ";
+                                                    }
+                                                    add_msg += "`";
+                                                    add_msg += skin_name;
+                                                    add_msg += "` by `";
+                                                    add_msg += &skin.author;
+                                                    add_msg += "` license: `";
+                                                    add_msg += &skin.license;
+                                                    add_msg += "`\n";
+                                                    new_msg += &add_msg;
+                                                },
+                                            );
+                                        }
+                                    }
+                                    // if still over 2000, simply say how many skins to upload
+                                    if new_msg.chars().count() >= 2000 {
+                                        new_msg = main_cmd_str.clone();
+                                        if !item.errors.is_empty() {
+                                            new_msg += &format!(
+                                                "There are {} errors\n",
+                                                item.errors.len()
+                                            );
+                                        }
+                                        if !item.skins_to_upload.is_empty() {
+                                            new_msg += &format!(
+                                                "{} skins will be uploaded\n",
+                                                item.skins_to_upload.len()
+                                            );
+                                        }
                                     }
                                     if let Err(err) = command
                                         .edit_response(
