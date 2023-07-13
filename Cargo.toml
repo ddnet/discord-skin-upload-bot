@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.71"
-dotenv = "0.15.0"
+dotenvy = "0.15.7"
 hashlink = "0.8.3"
 image = "0.24.6"
 regex = "1.8.4"

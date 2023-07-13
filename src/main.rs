@@ -976,7 +976,7 @@ async fn main() {
     env::set_var("PASSWORD", "");
     */
 
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     // Login with a bot token from the environment
     let token = env::var("DISCORD_TOKEN").expect("token");
