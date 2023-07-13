@@ -48,7 +48,7 @@ impl<'a> CommandWrapper<'a> {
         }
     }
 
-    fn channel_id(&self) -> ChannelId {
+    const fn channel_id(&self) -> ChannelId {
         match self {
             CommandWrapper::Cmd(cmd) => cmd.channel_id,
             CommandWrapper::Btn(btn) => btn.channel_id,
@@ -56,9 +56,9 @@ impl<'a> CommandWrapper<'a> {
     }
 }
 
-fn parse_skin_info(text: &String) -> anyhow::Result<(String, String, String)> {
+fn parse_skin_info(text: &str) -> anyhow::Result<(String, String, String)> {
     let matches_text = regex::Regex::new("\"(.+)\" by (.+) \\((.+)\\)").unwrap();
-    let caps = matches_text.captures(&text);
+    let caps = matches_text.captures(text);
     if caps.is_some() && caps.as_ref().unwrap().len() > 2 {
         Ok((
             caps.as_ref().unwrap().get(1).unwrap().as_str().to_string(),
@@ -68,7 +68,7 @@ fn parse_skin_info(text: &String) -> anyhow::Result<(String, String, String)> {
     } else {
         Err(anyhow::Error::msg(format!(
             "name, author or license not found in msg: {}",
-            text.replace("\n", "")
+            text.replace('\n', "")
         )))
     }
 }
@@ -84,7 +84,7 @@ impl Handler {
             .uploads
             .get_mut(&user_id)
         {
-            if let SkinUploadState::Collecting = item.state {
+            if item.state == SkinUploadState::Collecting {
                 let data = CreateInteractionResponseMessage::new()
                     .content("Skin upload cancelled")
                     .ephemeral(true);
@@ -116,7 +116,7 @@ impl Handler {
 
     async fn upload_finish<'a>(ctx: Context, user_id: UserId, command: &CommandWrapper<'a>) {
         let database_url =
-            env::var("DATABASE_URL").unwrap_or("https://ddnet.org/skins/".to_string());
+            env::var("DATABASE_URL").unwrap_or_else(|_| "https://ddnet.org/skins/".to_string());
         let basic_auth_user_name =
             env::var("USERNAME").expect("Expected USERNAME for http auth in environment");
         let basic_auth_password =
@@ -135,7 +135,7 @@ impl Handler {
             .uploads
             .get_mut(&user_id)
         {
-            if let SkinUploadState::Collecting = item.state {
+            if item.state == SkinUploadState::Collecting {
                 item.state = SkinUploadState::Uploading;
                 item.notify.notify_one();
 
@@ -145,6 +145,7 @@ impl Handler {
                 drop(data);
 
                 let _g = upload_lock.lock().await;
+
                 let data = CreateInteractionResponseMessage::new()
                     .content("Starting to upload")
                     .ephemeral(true);
@@ -153,11 +154,11 @@ impl Handler {
                     println!("Could not respond to slash command: {why}");
                 }
 
-                let errors: Arc<Mutex<Vec<String>>> = Default::default();
-                let mut uploaded_skins_msg: Vec<String> = Default::default();
+                let errors: Arc<Mutex<Vec<String>>> = Arc::default();
+                let mut uploaded_skins_msg: Vec<String> = Vec::default();
                 uploaded_skins_msg
                     .push("The following skins were added to the database:\n".to_string());
-                let mut uploaded_skin_users: HashSet<UserId> = Default::default();
+                let mut uploaded_skin_users: HashSet<UserId> = HashSet::default();
                 let were_skins_uploaded = !skins_to_upload.is_empty();
                 for (skin_name, skin_to_upload) in skins_to_upload.drain() {
                     let author = skin_to_upload.author;
@@ -201,7 +202,7 @@ impl Handler {
                                 .basic_auth(basic_auth_user_name, Some(basic_auth_password))
                                 .send()
                             {
-                                errors_clone.blocking_lock().push(format!("There was an error while uploading {}.\nPlease manually check if this broke the database\n", err));
+                                errors_clone.blocking_lock().push(format!("There was an error while uploading {err}.\nPlease manually check if this broke the database\n"));
                             }
                         }).await.unwrap();
 
@@ -234,7 +235,7 @@ impl Handler {
                                 .basic_auth(basic_auth_user_name, Some(basic_auth_password))
                                 .send()
                             {
-                                errors_clone.blocking_lock().push(format!("There was an error while uploading {}.\nPlease manually check if this broke the database\n", err));
+                                errors_clone.blocking_lock().push(format!("There was an error while uploading {err}.\nPlease manually check if this broke the database\n"));
                             }}
                         ).await.unwrap();
 
@@ -275,7 +276,7 @@ impl Handler {
                 }
 
                 if were_skins_uploaded {
-                    for upload_msg in uploaded_skins_msg.iter() {
+                    for upload_msg in &uploaded_skins_msg {
                         if let Err(err) = command
                             .channel_id()
                             .send_message(
@@ -451,11 +452,11 @@ impl EventHandler for Handler {
                                 command.user.id,
                                 SkinUploadItem {
                                     notify: notify.clone(),
-                                    reaction_list: Default::default(),
-                                    skins_try_upload: Default::default(),
+                                    reaction_list: LinkedHashMap::default(),
+                                    skins_try_upload: LinkedHashMap::default(),
                                     state: SkinUploadState::Collecting,
-                                    errors: Default::default(),
-                                    skins_to_upload: Default::default(),
+                                    errors: VecDeque::default(),
+                                    skins_to_upload: LinkedHashMap::default(),
                                 },
                             );
 
@@ -487,7 +488,7 @@ impl EventHandler for Handler {
                                                 {
                                                     let text = skin_msg.content;
                                                     let mut all_required_info = true;
-                                                    let mut skin_name = Default::default();
+                                                    let mut skin_name = String::default();
                                                     let mut author_name = String::default();
                                                     let mut license_name = String::default();
                                                     match parse_skin_info(&text) {
@@ -504,8 +505,7 @@ impl EventHandler for Handler {
                                                             {
                                                                 if skin.database != msg_database {
                                                                     item.errors.push_back(format!(
-                                                                    "you changed the database upload type of: {}. If you did a mistake cancel the upload and try again.",
-                                                                    skin_name
+                                                                    "you changed the database upload type of: {skin_name}. If you did a mistake cancel the upload and try again."
                                                                 ));
                                                                     all_required_info = false;
                                                                 }
@@ -517,9 +517,7 @@ impl EventHandler for Handler {
                                                         }
                                                     }
                                                     if all_required_info {
-                                                        for attachment in
-                                                            skin_msg.attachments.iter()
-                                                        {
+                                                        for attachment in &skin_msg.attachments {
                                                             if let Ok(file) =
                                                                 attachment.download().await
                                                             {
@@ -572,7 +570,7 @@ impl EventHandler for Handler {
                                                                                     license: license_name.clone(),
                                                                                     file_256x128: Vec::new(),
                                                                                     file_512x256: Vec::new(),
-                                                                                    database: msg_database.clone(),
+                                                                                    database: msg_database,
                                                                                     original_msg_id: msg_id,
                                                                                     positive_ratio: if positive_count + negative_count > 0 { positive_count as f64 / (positive_count + negative_count) as f64 } else { 0.0 },
                                                                                 });
@@ -627,7 +625,7 @@ impl EventHandler for Handler {
                                             }
                                         }
                                         SkinUploadState::Uploading | SkinUploadState::Cancelled => {
-                                            if let Err(_) = command.delete_response(&ctx).await {
+                                            if (command.delete_response(&ctx).await).is_err() {
                                                 println!("Response not deleted.");
                                             }
                                             data.get_mut::<SkinUploads>()
@@ -644,7 +642,7 @@ impl EventHandler for Handler {
                                         new_msg += "__**Errors**__:\n";
                                         item.errors.iter().for_each(|err| {
                                             new_msg += "> - ";
-                                            new_msg += &err;
+                                            new_msg += err;
                                             new_msg += "\n";
                                         });
                                     }
@@ -653,7 +651,7 @@ impl EventHandler for Handler {
                                         item.skins_to_upload.iter().for_each(
                                             |(skin_name, skin)| {
                                                 let mut add_msg = "> - ".to_string();
-                                                if let SkinToUploadDB::Normal = &skin.database  {
+                                                if matches!(&skin.database, SkinToUploadDB::Normal)  {
                                                     add_msg += "✅ ";
                                                 }
                                                 else{
@@ -694,8 +692,11 @@ impl EventHandler for Handler {
                                             new_msg += "Upload:\n";
                                             item.skins_to_upload.iter().for_each(
                                                 |(skin_name, skin)| {
-                                                    let mut add_msg = "".to_string();
-                                                    if let SkinToUploadDB::Normal = &skin.database {
+                                                    let mut add_msg = String::new();
+                                                    if matches!(
+                                                        &skin.database,
+                                                        SkinToUploadDB::Normal
+                                                    ) {
                                                         add_msg += "✅ ";
                                                     } else {
                                                         add_msg += "☑️ ";
@@ -776,7 +777,7 @@ impl EventHandler for Handler {
     }
 
     async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
-        if !add_reaction.user_id.is_some() {
+        if add_reaction.user_id.is_none() {
             return;
         }
         if add_reaction.emoji.unicode_eq("✅") {
@@ -794,9 +795,10 @@ impl EventHandler for Handler {
                     .reaction_list
                     .insert(add_reaction.message_id, add_reaction.user_id.unwrap());
                 if let Ok(msg) = add_reaction.message(&ctx).await {
-                    if let Err(_) = msg
+                    if (msg
                         .delete_reaction_emoji(&ctx, ReactionType::Unicode("☑️".to_string()))
-                        .await
+                        .await)
+                        .is_err()
                     {
                         println!("no permissions to delete reaction");
                     }
@@ -825,9 +827,10 @@ impl EventHandler for Handler {
                     .reaction_list
                     .insert(add_reaction.message_id, add_reaction.user_id.unwrap());
                 if let Ok(msg) = add_reaction.message(&ctx).await {
-                    if let Err(_) = msg
+                    if (msg
                         .delete_reaction_emoji(&ctx, ReactionType::Unicode("✅".to_string()))
-                        .await
+                        .await)
+                        .is_err()
                     {
                         println!("no permissions to delete reaction");
                     }
@@ -848,7 +851,7 @@ impl EventHandler for Handler {
     }
 
     async fn reaction_remove(&self, ctx: Context, removed_reaction: Reaction) {
-        if !removed_reaction.user_id.is_some() {
+        if removed_reaction.user_id.is_none() {
             return;
         }
         if removed_reaction.emoji.unicode_eq("✅") || removed_reaction.emoji.unicode_eq("☑️") {
@@ -898,35 +901,37 @@ impl EventHandler for Handler {
             .description("Cancel an ongoing upload, that was started using the `/upload` command")
             .dm_permission(false);
 
-        if let Err(_) = guild_id
+        if (guild_id
             .set_commands(
                 &ctx.http,
                 vec![upload_cmd, upload_finish_cmd, upload_cancel_cmd],
             )
-            .await
+            .await)
+            .is_err()
         {
             // ignore for now
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkinUploadState {
     Collecting,
     Uploading,
     Cancelled,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkinToUploadDB {
     Normal,
     Community,
 }
 
-impl SkinToUploadDB {
-    pub fn to_string(&self) -> String {
+impl ToString for SkinToUploadDB {
+    fn to_string(&self) -> String {
         match self {
-            SkinToUploadDB::Normal => "normal".to_string(),
-            SkinToUploadDB::Community => "community".to_string(),
+            Self::Normal => "normal".to_string(),
+            Self::Community => "community".to_string(),
         }
     }
 }
@@ -957,7 +962,7 @@ pub struct SkinUploads {
 }
 
 impl TypeMapKey for SkinUploads {
-    type Value = SkinUploads;
+    type Value = Self;
 }
 
 #[tokio::main]
@@ -988,8 +993,8 @@ async fn main() {
         .expect("Error creating client");
 
     let skin_uploads = SkinUploads {
-        uploads: Default::default(),
-        upload_lock: Default::default(),
+        uploads: HashMap::default(),
+        upload_lock: Arc::default(),
     };
     client
         .data
@@ -999,6 +1004,6 @@ async fn main() {
 
     // start listening for events by starting a single shard
     if let Err(why) = client.start().await {
-        println!("An error occurred while running the client: {:?}", why);
+        println!("An error occurred while running the client: {why:?}");
     }
 }
