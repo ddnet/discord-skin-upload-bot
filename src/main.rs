@@ -201,7 +201,7 @@ impl Handler {
                                 .basic_auth(basic_auth_user_name, Some(basic_auth_password))
                                 .send()
                             {
-                                errors_clone.blocking_lock().push(format!("There was an error while uploading {}.\nPlease manually check if this broke the database", err));
+                                errors_clone.blocking_lock().push(format!("There was an error while uploading {}.\nPlease manually check if this broke the database\n", err));
                             }
                         }).await.unwrap();
 
@@ -608,6 +608,17 @@ impl EventHandler for Handler {
 
                                                         if skin_msg.attachments.is_empty() {
                                                             item.errors.push_back("No skin file attachments found in one of the messages you reacted to...".to_string());
+                                                        }
+
+                                                        if let Some(skin) =
+                                                            item.skins_to_upload.get(&skin_name)
+                                                        {
+                                                            if skin.file_256x128.is_empty() {
+                                                                item.skins_to_upload
+                                                                    .remove(&skin_name);
+                                                                // there must be a non hd skin
+                                                                item.errors.push_back("The skin ".to_string() + &skin_name + " had no 256x128 skin. This is not allowed");
+                                                            }
                                                         }
                                                     }
                                                 } else {
