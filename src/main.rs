@@ -57,7 +57,7 @@ impl<'a> CommandWrapper<'a> {
 }
 
 fn parse_skin_info(text: &str) -> anyhow::Result<(String, String, String)> {
-    let matches_text = regex::Regex::new("\"(.+)\" by (.+) \\((.+)\\)").unwrap();
+    let matches_text = regex::Regex::new("(?i)\"(.+)\" by (.+) \\((.+)\\)").unwrap();
     let caps = matches_text.captures(text);
     if caps.is_some() && caps.as_ref().unwrap().len() > 2 {
         Ok((
