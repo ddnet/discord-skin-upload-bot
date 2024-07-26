@@ -1,8 +1,11 @@
+mod dilate;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dilate::dilate_image;
 use hashlink::LinkedHashMap;
 use image::{ColorType, ImageFormat};
 use serenity::all::{
@@ -185,9 +188,11 @@ impl Handler {
                         let basic_auth_password = basic_auth_password.clone();
                         let db_url = database_url.clone();
                         tokio::task::spawn_blocking(move || {
+                            let mut img = skin_to_upload.file_256x128.clone();
+                            dilate_image(&mut img, 256, 128, 4);
                             image::save_buffer_with_format(
                                 skin_name_clone.clone() + ".png",
-                                &skin_to_upload.file_256x128,
+                                &img,
                                 256,
                                 128,
                                 ColorType::Rgba8,
@@ -218,9 +223,11 @@ impl Handler {
                         let basic_auth_password = basic_auth_password.clone();
                         let db_url = database_url.clone();
                         tokio::task::spawn_blocking(move || {
+                            let mut img = skin_to_upload.file_512x256.clone();
+                            dilate_image(&mut img, 512, 256, 4);
                             image::save_buffer_with_format(
                                 skin_name_clone.clone() + ".png",
-                                &skin_to_upload.file_512x256,
+                                &img,
                                 512,
                                 256,
                                 ColorType::Rgba8,
