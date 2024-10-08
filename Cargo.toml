@@ -12,5 +12,5 @@ hashlink = "0.8.3"
 image = "0.24.6"
 regex = "1.8.4"
 reqwest = { version = "0.11.18", features = ["blocking"] }
-serenity = { git = "https://github.com/serenity-rs/serenity", branch = "next", commit = "2bb56baf63d8f65246f075f1922d2d0571ae0cb5" }
+serenity = { git = "https://github.com/serenity-rs/serenity", rev = "2bb56baf63d8f65246f075f1922d2d0571ae0cb5" }
 tokio = { version = "1.28.2", features = ["rt-multi-thread", "time"] }

@@ -265,9 +265,9 @@ impl Handler {
                             + " ("
                             + &format!(
                                 "https://discord.com/channels/{}/{}/{}",
-                                guild_id.0,
-                                command.channel_id().0,
-                                msg.id.0
+                                guild_id,
+                                command.channel_id(),
+                                msg.id
                             )
                             + ") \n";
                         if uploaded_skins_msg.last().unwrap().chars().count()
@@ -488,91 +488,101 @@ impl EventHandler for Handler {
                                             for (msg_id, msg_database) in
                                                 item.skins_try_upload.drain()
                                             {
-                                                if let Ok(skin_msg) = ctx
+                                                match ctx
                                                     .http
                                                     .get_message(command.channel_id, msg_id)
                                                     .await
                                                 {
-                                                    let text = skin_msg.content;
-                                                    let mut all_required_info = true;
-                                                    let mut skin_name = String::default();
-                                                    let mut author_name = String::default();
-                                                    let mut license_name = String::default();
-                                                    match parse_skin_info(&text) {
-                                                        Ok((
-                                                            skin_name_res,
-                                                            author_name_res,
-                                                            license_name_res,
-                                                        )) => {
-                                                            skin_name = skin_name_res;
-                                                            author_name = author_name_res;
-                                                            license_name = license_name_res;
-                                                            if let Some(skin) =
-                                                                item.skins_to_upload.get(&skin_name)
-                                                            {
-                                                                if skin.database != msg_database {
-                                                                    item.errors.push_back(format!(
+                                                    Ok(skin_msg) => {
+                                                        let text = skin_msg.content;
+                                                        let mut all_required_info = true;
+                                                        let mut skin_name = String::default();
+                                                        let mut author_name = String::default();
+                                                        let mut license_name = String::default();
+                                                        match parse_skin_info(&text) {
+                                                            Ok((
+                                                                skin_name_res,
+                                                                author_name_res,
+                                                                license_name_res,
+                                                            )) => {
+                                                                skin_name = skin_name_res;
+                                                                author_name = author_name_res;
+                                                                license_name = license_name_res;
+                                                                if let Some(skin) = item
+                                                                    .skins_to_upload
+                                                                    .get(&skin_name)
+                                                                {
+                                                                    if skin.database != msg_database
+                                                                    {
+                                                                        item.errors.push_back(format!(
                                                                     "you changed the database upload type of: {skin_name}. If you did a mistake cancel the upload and try again."
                                                                 ));
-                                                                    all_required_info = false;
+                                                                        all_required_info = false;
+                                                                    }
                                                                 }
                                                             }
+                                                            Err(err) => {
+                                                                item.errors
+                                                                    .push_back(err.to_string());
+                                                                all_required_info = false;
+                                                            }
                                                         }
-                                                        Err(err) => {
-                                                            item.errors.push_back(err.to_string());
-                                                            all_required_info = false;
-                                                        }
-                                                    }
-                                                    if all_required_info {
-                                                        for attachment in &skin_msg.attachments {
-                                                            if let Ok(file) =
-                                                                attachment.download().await
+                                                        if all_required_info {
+                                                            for attachment in &skin_msg.attachments
                                                             {
-                                                                if let Ok(img) =
-                                                                    image::load_from_memory(&file)
+                                                                if let Ok(file) =
+                                                                    attachment.download().await
                                                                 {
-                                                                    if let Some(img_rgba) =
-                                                                        img.as_rgba8()
+                                                                    if let Ok(img) =
+                                                                        image::load_from_memory(
+                                                                            &file,
+                                                                        )
                                                                     {
-                                                                        if img_rgba.dimensions()
-                                                                            == (256, 128)
-                                                                            || img_rgba.dimensions()
-                                                                                == (512, 256)
+                                                                        if let Some(img_rgba) =
+                                                                            img.as_rgba8()
                                                                         {
-                                                                            if !item
-                                                                                .skins_to_upload
-                                                                                .contains_key(
-                                                                                    &skin_name,
-                                                                                )
+                                                                            if img_rgba.dimensions()
+                                                                                == (256, 128)
+                                                                                || img_rgba
+                                                                                    .dimensions()
+                                                                                    == (512, 256)
                                                                             {
-                                                                                let mut
-                                                                                positive_count = 0;
-                                                                                let mut
-                                                                                negative_count = 0;
-                                                                                if let Ok(
-                                                                                    original_msg,
-                                                                                ) = command
-                                                                                    .channel_id
-                                                                                    .message(
-                                                                                        &ctx,
-                                                                                        msg_id,
+                                                                                if !item
+                                                                                    .skins_to_upload
+                                                                                    .contains_key(
+                                                                                        &skin_name,
                                                                                     )
-                                                                                    .await
                                                                                 {
-                                                                                    original_msg.reactions.iter().for_each(|reaction| {
+                                                                                    let mut
+                                                                                    positive_count =
+                                                                                        0;
+                                                                                    let mut
+                                                                                    negative_count =
+                                                                                        0;
+                                                                                    if let Ok(
+                                                                                        original_msg,
+                                                                                    ) = command
+                                                                                        .channel_id
+                                                                                        .message(
+                                                                                            &ctx,
+                                                                                            msg_id,
+                                                                                        )
+                                                                                        .await
+                                                                                    {
+                                                                                        original_msg.reactions.iter().for_each(|reaction| {
                                                                                         if let ReactionType::Custom { animated: _, id, name: _ } = &reaction.reaction_type {
                                                                                             // brownbear emoji id
-                                                                                            if id.0.get() == 346683497701834762 {
+                                                                                            if id.get() == 346683497701834762 {
                                                                                                 positive_count = reaction.count - 1;
                                                                                             }
                                                                                             // cammostripes emoji id
-                                                                                            else if id.0.get() == 346683496476966913 {
+                                                                                            else if id.get() == 346683496476966913 {
                                                                                                 negative_count = reaction.count - 1;
                                                                                             }
                                                                                         }
                                                                                     });
-                                                                                }
-                                                                                item.skins_to_upload.insert(skin_name.clone(), SkinToUpload {
+                                                                                    }
+                                                                                    item.skins_to_upload.insert(skin_name.clone(), SkinToUpload {
                                                                                     author: author_name.clone(),
                                                                                     license: license_name.clone(),
                                                                                     file_256x128: Vec::new(),
@@ -581,53 +591,57 @@ impl EventHandler for Handler {
                                                                                     original_msg_id: msg_id,
                                                                                     positive_ratio: if positive_count + negative_count > 0 { positive_count as f64 / (positive_count + negative_count) as f64 } else { 0.0 },
                                                                                 });
-                                                                            }
-                                                                            if img_rgba.dimensions()
-                                                                                == (256, 128)
-                                                                            {
-                                                                                item.skins_to_upload
+                                                                                }
+                                                                                if img_rgba
+                                                                                    .dimensions()
+                                                                                    == (256, 128)
+                                                                                {
+                                                                                    item.skins_to_upload
                                                                                 .get_mut(&skin_name)
                                                                                 .unwrap()
                                                                                 .file_256x128 =
                                                                                 img_rgba.to_vec();
-                                                                            } else {
-                                                                                item.skins_to_upload
+                                                                                } else {
+                                                                                    item.skins_to_upload
                                                                                     .get_mut(&skin_name)
                                                                                     .unwrap()
                                                                                     .file_512x256 =
                                                                                     img_rgba.to_vec();
+                                                                                }
+                                                                            } else {
+                                                                                item.errors.push_back(format!("skin: {} did not contain a valid 256x128 or 512x256 skin", skin_name.clone()));
                                                                             }
                                                                         } else {
-                                                                            item.errors.push_back(format!("skin: {} did not contain a valid 256x128 or 512x256 skin", skin_name.clone()));
+                                                                            item.errors.push_back("One of the reacted messages contained an image file that could not be converted to RGBA...".to_string());
                                                                         }
                                                                     } else {
-                                                                        item.errors.push_back("One of the reacted messages contained an image file that could not be converted to RGBA...".to_string());
+                                                                        item.errors.push_back("One of the reacted messages contained an invalid image file...".to_string());
                                                                     }
                                                                 } else {
-                                                                    item.errors.push_back("One of the reacted messages contained an invalid image file...".to_string());
+                                                                    item.errors.push_back("One of the reacted messages did not contain a valid skin file...".to_string());
                                                                 }
-                                                            } else {
-                                                                item.errors.push_back("One of the reacted messages did not contain a valid skin file...".to_string());
                                                             }
-                                                        }
 
-                                                        if skin_msg.attachments.is_empty() {
-                                                            item.errors.push_back("No skin file attachments found in one of the messages you reacted to...".to_string());
-                                                        }
+                                                            if skin_msg.attachments.is_empty() {
+                                                                item.errors.push_back("No skin file attachments found in one of the messages you reacted to...".to_string());
+                                                            }
 
-                                                        if let Some(skin) =
-                                                            item.skins_to_upload.get(&skin_name)
-                                                        {
-                                                            if skin.file_256x128.is_empty() {
-                                                                item.skins_to_upload
-                                                                    .remove(&skin_name);
-                                                                // there must be a non hd skin
-                                                                item.errors.push_back("The skin ".to_string() + &skin_name + " had no 256x128 skin. This is not allowed");
+                                                            if let Some(skin) =
+                                                                item.skins_to_upload.get(&skin_name)
+                                                            {
+                                                                if skin.file_256x128.is_empty() {
+                                                                    item.skins_to_upload
+                                                                        .remove(&skin_name);
+                                                                    // there must be a non hd skin
+                                                                    item.errors.push_back("The skin ".to_string() + &skin_name + " had no 256x128 skin. This is not allowed");
+                                                                }
                                                             }
                                                         }
                                                     }
-                                                } else {
-                                                    item.errors.push_back("One of the reacted messages was not found anymore...".to_string());
+                                                    Err(err) => {
+                                                        println!("{err}");
+                                                        item.errors.push_back("One of the reacted messages was not found anymore...".to_string());
+                                                    }
                                                 }
                                             }
                                         }
@@ -676,9 +690,9 @@ impl EventHandler for Handler {
                                                 }
                                                 add_msg += &format!(
                                                     " https://discord.com/channels/{}/{}/{}",
-                                                    guild_id.0,
-                                                    command.channel_id.0,
-                                                    skin.original_msg_id.0
+                                                    guild_id,
+                                                    command.channel_id,
+                                                    skin.original_msg_id
                                                 );
                                                 add_msg += "\n";
                                                 new_msg += &add_msg;
